@@ -1,0 +1,41 @@
+.DS_Store
+
+# Large guide bundles and media
+*.zip
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# ATEC / Isaac Lab generated artifacts
+ATEC2026_Simulation_Challenge/atec_robot_model/
+atec_robot_model/
+datasets/
+runs/
+logs/
+videos/
+checkpoints/
+outputs/
+wandb/
+
+# Python / simulator caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.isaacsim/
+.nucleus/
+
+# Model and checkpoint artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.hdf5
+*.h5
+
+# Crash/core files
+core
+core.*
