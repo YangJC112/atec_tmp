@@ -9,6 +9,7 @@
 
 # ATEC / Isaac Lab generated artifacts
 ATEC2026_Simulation_Challenge/atec_robot_model/
+guide/ATEC2026_Simulation_Challenge/atec_robot_model/
 atec_robot_model/
 datasets/
 runs/
@@ -27,6 +28,7 @@ __pycache__/
 .cache/
 .isaacsim/
 .nucleus/
+.tmp_remote/
 
 # Model and checkpoint artifacts
 *.pt
