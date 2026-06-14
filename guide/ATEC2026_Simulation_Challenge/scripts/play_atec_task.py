@@ -2,8 +2,13 @@
 
 import argparse
 import os
+import sys
 import time
 import json
+
+CHALLENGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if CHALLENGE_DIR not in sys.path:
+    sys.path.insert(0, CHALLENGE_DIR)
 
 from isaaclab.app import AppLauncher
 
@@ -18,6 +23,7 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--seed", type=int, default=None, help="Environment seed for reproducible local runs.")
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
     "--debug",
@@ -72,10 +78,11 @@ def play() -> tuple[float, float]:
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric
     )
+    if args_cli.seed is not None:
+        env_cfg.seed = args_cli.seed
 
-    # TODO: simulate getting action spec from jason string (e.g. from a file or network)
-    # action_spec = solution.get_action_spec() if hasattr(solution, "get_action_spec") else None
-    # action_spec_json = json.dumps(action_spec)
+    action_spec = solution.get_action_spec() if hasattr(solution, "get_action_spec") else {}
+    action_spec_json = json.dumps(action_spec if action_spec is not None else {})
 
     # New Feature: apply safe action spec to env config (e.g. for scaling/clipping actions from your solution)
     env_cfg = apply_safe_action_spec(env_cfg, action_spec_json)

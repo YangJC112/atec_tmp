@@ -59,12 +59,6 @@ CAM_FY = 732.999267578125
 CAM_CX = 320.0
 CAM_CY = 240.0
 
-TARGET_CENTER_OFFSETS = {
-    1: np.array([0.000, 0.000, 0.0], dtype=np.float64),
-    2: np.array([0.000, 0.000, 0.0], dtype=np.float64),
-    3: np.array([0.000, 0.000, 0.0], dtype=np.float64),
-}
-
 
 def _quat_to_matrix_wxyz(q: np.ndarray) -> np.ndarray:
     w, x, y, z = q.astype(np.float64)
@@ -117,32 +111,6 @@ _GRIPPER_ROT_W_Q_ZERO = _quat_to_matrix_wxyz(
 )
 _LINK6_TO_GRIPPER_ROT = _fk_piper_transform(np.zeros(6, dtype=np.float64))[:3, :3].T @ _S_DH_TO_WORLD.T @ _GRIPPER_ROT_W_Q_ZERO
 _TOP_DOWN_ROT_W = _quat_to_matrix_wxyz(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64))
-_GRASP_ROT_W_BY_OBJECT = {
-    1: np.array(
-        [
-            [0.0, -1.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
-        ],
-        dtype=np.float64,
-    ),
-    2: np.array(
-        [
-            [0.0, 1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
-        ],
-        dtype=np.float64,
-    ),
-    3: np.array(
-        [
-            [0.0, 1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
-        ],
-        dtype=np.float64,
-    ),
-}
 
 
 def _world_to_piper_base(pos_w: np.ndarray) -> np.ndarray:
@@ -166,19 +134,13 @@ def _pose_error(target_pos_base: np.ndarray, target_rot_w: np.ndarray, q: np.nda
     return np.r_[pos_err, 0.35 * rot_err]
 
 
-def _ik_position(
-    target_w: np.ndarray,
-    q_init: np.ndarray,
-    target_rot_w: np.ndarray | None = None,
-    max_iter: int = 70,
-) -> np.ndarray:
+def _ik_position(target_w: np.ndarray, q_init: np.ndarray, max_iter: int = 70) -> np.ndarray:
     target = _world_to_piper_base(target_w)
-    target_rot = _TOP_DOWN_ROT_W if target_rot_w is None else target_rot_w
     q = np.clip(q_init[:6].astype(np.float64), JOINT_LIMITS[:, 0], JOINT_LIMITS[:, 1])
     q = 0.75 * q + 0.25 * HOME_Q
 
     for _ in range(max_iter):
-        err = _pose_error(target, target_rot, q)
+        err = _pose_error(target, _TOP_DOWN_ROT_W, q)
         if np.linalg.norm(err[:3]) < 0.008 and np.linalg.norm(err[3:]) < 0.025:
             break
 
@@ -187,7 +149,7 @@ def _ik_position(
         for i in range(6):
             q_eps = q.copy()
             q_eps[i] += eps
-            jac[:, i] = (_pose_error(target, target_rot, q_eps) - err) / eps
+            jac[:, i] = (_pose_error(target, _TOP_DOWN_ROT_W, q_eps) - err) / eps
 
         damping = 0.07
         lhs = jac @ jac.T + (damping * damping) * np.eye(err.shape[0])
@@ -226,7 +188,6 @@ class AlgSolution:
         self._target_idx = 0
         self._stage_idx = 0
         self._stage_step = 0
-        self._basket_pos_w = BASKET_CENTER_W.copy()
         self._stages: list[Stage] = []
         self._last_q_target = np.r_[HOME_Q, GRIPPER_OPEN]
         self._stage_q_cache: dict[tuple[int, int, str], np.ndarray] = {}
@@ -239,13 +200,17 @@ class AlgSolution:
         return {}
 
     def predicts(self, obs, current_score):
+        score_value = current_score.item() if hasattr(current_score, "item") else float(current_score)
+        if score_value >= 5.99:
+            action = np.zeros((1, 8), dtype=np.float32)
+            return {"action": action.tolist(), "giveup": True}
+
         proprio = obs["proprio"]
         device = proprio.device if isinstance(proprio, torch.Tensor) else "cpu"
         q_abs = _as_numpy(proprio)[0, :8].astype(np.float64) + DEFAULT_JOINT_POS
 
         if not self._targets:
             self._targets = self._detect_targets(obs)
-            self._basket_pos_w = self._detect_basket(obs)
             self._target_idx = 0
             self._stage_idx = 0
             self._stage_step = 0
@@ -274,7 +239,8 @@ class AlgSolution:
                 self._stage_step = 0
 
         action = ((q_cmd - DEFAULT_JOINT_POS) / 0.5).astype(np.float32)
-        return {"action": torch.as_tensor(action, dtype=torch.float32, device=device).view(1, 8).cpu().numpy().tolist(), "giveup": False}
+        done_all = bool(self._stages and self._stages[0].name == "done")
+        return {"action": torch.as_tensor(action, dtype=torch.float32, device=device).view(1, 8).cpu().numpy().tolist(), "giveup": done_all}
 
     def _stage_done(self, stage: Stage, q_abs: np.ndarray) -> bool:
         if self._stage_step < stage.min_steps:
@@ -312,8 +278,8 @@ class AlgSolution:
         pre = np.array([x, y, CARRY_Z], dtype=np.float64)
         reach = np.array([x, y, grasp_z], dtype=np.float64)
         lift = np.array([x, y, CARRY_Z], dtype=np.float64)
-        basket_high = np.array([self._basket_pos_w[0], self._basket_pos_w[1], CARRY_Z], dtype=np.float64)
-        basket_place = np.array([self._basket_pos_w[0], self._basket_pos_w[1], TABLE_TOP_Z + 0.15], dtype=np.float64)
+        basket_high = np.array([BASKET_CENTER_W[0], BASKET_CENTER_W[1], CARRY_Z], dtype=np.float64)
+        basket_place = np.array([BASKET_CENTER_W[0], BASKET_CENTER_W[1], TABLE_TOP_Z + 0.15], dtype=np.float64)
         return [
             Stage("home_joint", None, GRIPPER_OPEN, 50, 90, 0.12),
             Stage("pre", pre, GRIPPER_OPEN, 35, 150),
@@ -393,65 +359,11 @@ class AlgSolution:
                 ],
                 dtype=np.float64,
             )
-            pos = pos + TARGET_CENTER_OFFSETS.get(object_id, 0.0)
-            pos[0] = float(np.clip(pos[0], TABLE_CENTER_X - 0.11, TABLE_CENTER_X + 0.11))
-            pos[1] = float(np.clip(pos[1], lo + 0.01, hi - 0.01))
             targets.append(TargetObject(object_id, pos))
         return targets
 
     def _fallback_targets(self) -> list[TargetObject]:
         return [TargetObject(i, self._fallback_pos(i)) for i in (3, 2, 1)]
-
-    def _detect_basket(self, obs) -> np.ndarray:
-        image = obs.get("image", {})
-        if "video_depth" not in image or image["video_depth"] is None:
-            return BASKET_CENTER_W.copy()
-
-        depth = _as_numpy(image["video_depth"])
-        if depth.ndim == 4:
-            depth = depth[0, :, :, 0]
-        elif depth.ndim == 3:
-            depth = depth[0] if depth.shape[0] == 1 else depth[:, :, 0]
-        depth = depth.astype(np.float64)
-
-        h, w = depth.shape
-        stride = 4
-        cache_key = (h, w, stride)
-        if cache_key not in self._grid_cache:
-            vv, uu = np.mgrid[0:h:stride, 0:w:stride]
-            self._grid_cache[cache_key] = (uu.astype(np.float64), vv.astype(np.float64))
-        uu, vv = self._grid_cache[cache_key]
-        z = depth[0:h:stride, 0:w:stride]
-        finite = np.isfinite(z) & (z > 0.15) & (z < 6.0)
-
-        x_cam = (uu - CAM_CX) * z / CAM_FX
-        y_cam = (vv - CAM_CY) * z / CAM_FY
-        points_cam = np.stack([x_cam, y_cam, z], axis=-1)
-        points_w = points_cam @ CAM_R_WC.T + CAM_POS_W
-
-        xw = points_w[..., 0]
-        yw = points_w[..., 1]
-        zw = points_w[..., 2]
-        basket = (
-            finite
-            & (xw > BASKET_CENTER_W[0] - 0.24)
-            & (xw < BASKET_CENTER_W[0] + 0.24)
-            & (yw > BASKET_CENTER_W[1] - 0.18)
-            & (yw < BASKET_CENTER_W[1] + 0.18)
-            & (zw > TABLE_TOP_Z + 0.02)
-            & (zw < TABLE_TOP_Z + 0.35)
-        )
-        if int(basket.sum()) < 20:
-            return BASKET_CENTER_W.copy()
-
-        return np.array(
-            [
-                float(np.clip(np.median(xw[basket]), BASKET_CENTER_W[0] - 0.08, BASKET_CENTER_W[0] + 0.08)),
-                float(np.clip(np.median(yw[basket]), BASKET_CENTER_W[1] - 0.08, BASKET_CENTER_W[1] + 0.08)),
-                TABLE_TOP_Z + 0.15,
-            ],
-            dtype=np.float64,
-        )
 
     def _fallback_pos(self, object_id: int) -> np.ndarray:
         y = {1: 0.25, 2: 0.16, 3: 0.06}.get(object_id, 0.06)
